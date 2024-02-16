@@ -24,7 +24,7 @@
 
 ```bash
 1. Clone this repository:
-   git clone [https://github.com/your-username/bitcoin-tx-analyzer](https://github.com/your-username/bitcoin-tx-analyzer)
+   git clone https://github.com/harshjamdar/RSZ-Scanner.git
 
 2. Install the required dependencies:
    cd bitcoin-tx-analyzer
