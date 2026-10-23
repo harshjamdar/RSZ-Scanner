@@ -1,67 +1,68 @@
+# RSZ-Scanner
 
+RSZ-Scanner inspects Bitcoin transactions for ECDSA signatures with repeated or related nonces. When it finds a candidate, it calculates a possible private key and verifies it against the public key from the signatures before saving it.
 
-# Bitcoin Transaction Analyzer and Private Key Recovery
+## Features
 
-**This Python project helps analyze Bitcoin transactions associated with an address and attempts to recover potential private keys through the analysis of ECDSA signatures used in the transactions.**
+- Fetches address transaction data from mempool.space, with Blockstream as a transaction lookup fallback.
+- Parses legacy and supported SegWit inputs and builds signature message hashes.
+- Searches for repeated or related ECDSA nonces.
+- Verifies recovered key candidates against the public key before writing them.
+- Shows address-by-address progress and prints a run summary.
+- Lets you configure HTTP timeouts, retry attempts, retry backoff, and the output file.
 
-## Key Features
+## Requirements
 
-* **Transaction Data Retrieval:** Fetches details of transactions (input/output) associated with a specified Bitcoin address from mempool.space.  
-* **ECDSA Signature Extraction:** Parses raw transaction data to extract the 'r', 's', and 'z' components of ECDSA signatures.
-* **Duplicate-R Detection:** Identifies transactions that reuse the 'R' value within ECDSA signatures. Reusing 'R' is a security weakness.
-* **Private Key Recovery Attempt:** Applies a mathematical approach (BSGS algorithm) to the extracted data in an attempt to calculate the private key (if the duplicate-R vulnerability exists).
+- Python 3.6 or later
+- The `secp256k1.py` wrapper and compatible native library included in this repository
+- Python packages listed in `requirements.txt`
 
-## Prerequisites
-
-* Python 3.6 or later
-* **Dependencies:**
-   * `requests`
-   * `json`
-   * `hashlib`
-   * `secp256k1` (`pip install secp256k1`)
-
-## Installation
+Install the listed packages with:
 
 ```bash
-1. Clone this repository:
-   git clone https://github.com/harshjamdar/RSZ-Scanner.git
-
-2. Install the required dependencies:
-   cd RSZ-Scanner
-   pip install -r requirements.txt 
+python -m pip install -r requirements.txt
 ```
-## Usage
+
+## Prepare addresses
+
+Create a UTF-8 text file with one Bitcoin address per line. Blank lines are ignored. Addresses with no matching transaction inputs are reported and skipped. The scanner can skip inputs it cannot parse or does not support.
+
+## Run
 
 ```bash
-1. Create a text file (e.g., `addresses.txt`) containing the Bitcoin addresses you want to analyze, with one address per line.
-
-2. Execute the script:
-   python main.py -f addresses.txt
+python main.py --file addresses.txt
 ```
-i have added a sample file with about 1 million legacy address i am not sure are all addresses legacy so if u got error in any address just delete it from file
 
-## Script Output
+This uses the defaults: 20 seconds per HTTP request, 3 attempts per request, a 1.5 retry-delay multiplier, and `private_keys.txt` as the output file.
 
-* **For each address:** 
-* Relevant transaction details, including transaction IDs (txid).
-* Values of 'r', 's', and 'z' from ECDSA signatures for each transaction.
-* Indications of transactions with duplicate 'R' values.
-* If private key recovery is successful, the calculated private key will be printed.
-* **All recovered private keys are saved to a file named `private_keys.txt`.**
+### Options
 
-## Important Notes
+| Option | Default | Description |
+| --- | --- | --- |
+| `-f`, `--file` | Required | Text file containing one address per line |
+| `-o`, `--output` | `private_keys.txt` | File to append verified keys to |
+| `--timeout` | `20` | HTTP timeout in seconds |
+| `--retries` | `3` | Maximum attempts for each HTTP request |
+| `--retry-backoff` | `1.5` | Multiplier applied to the delay between retry attempts |
 
-* Success in recovering private keys depends on the existence of transactions using duplicate 'R' values. This scenario is possible due to certain weaknesses in implementations of ECDSA or random number generators.
-* Use this tool for educational and security research purposes.
+For example, to use a different output file and retry configuration:
 
-## Contributing
-Contributions are welcome to enhance functionality or fix issues. Please submit a pull request with your proposed changes.
+```bash
+python main.py -f addresses.txt -o recovered_keys.txt --timeout 30 --retries 5 --retry-backoff 2
+```
 
-## Contact
-If you have questions or feedback, feel free to open an issue in this repository.
-License:
+The output file is opened in append mode. Each saved line contains the address and its verified private key. Protect this file as sensitive data.
 
-MIT License (see LICENSE file)
+## Progress and summary
 
+The program prints a progress line for each non-empty address. At completion, its summary reports the number of addresses in the file, addresses processed, failures, addresses without transactions, addresses without a recovery candidate, verified keys recovered, and keys saved. If interrupted, it prints a partial summary.
 
+## Limitations
 
+Recovery only succeeds when the transaction signatures expose a nonce relationship the scanner can identify. Unsupported scripts and malformed inputs may be skipped. Network access to the transaction data providers is required.
+
+Use this tool only for addresses and data you are authorized to analyze, such as your own wallets or controlled test data.
+
+## License
+
+MIT License. See [LICENSE](LICENSE).

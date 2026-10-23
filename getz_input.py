@@ -6,7 +6,7 @@
 import sys
 import hashlib
 import argparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 #==============================================================================
 parser = argparse.ArgumentParser(description='This tool helps to get ECDSA Signature r,s,z values from Bitcoin rawtx or txid', 
                                  epilog='Enjoy the program! :)    Tips BTC: bc1q39meky2mn5qjq704zz0nnkl0v7kj4uz6r529at')
@@ -74,7 +74,11 @@ def parseTx(txn):
 #==============================================================================
 def get_rawtx_from_blockchain(txid):
     try:
-        htmlfile = urlopen("https://blockchain.info/rawtx/%s?format=hex" % txid, timeout = 20)
+        request = Request(
+            "https://blockchain.info/rawtx/%s?format=hex" % txid,
+            headers={'User-Agent': 'RSZ-Scanner/1.0'}
+        )
+        htmlfile = urlopen(request, timeout = 20)
     except:
         print('Unable to connect internet to fetch RawTx. Exiting..')
         sys.exit(1)
